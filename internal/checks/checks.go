@@ -35,6 +35,7 @@ func All() []Check {
 		NakedPodsCheck{},
 		LocalStorageCheck{},
 		SafeToEvictCheck{},
+		MachineConfigCheck{},
 	}
 }
 

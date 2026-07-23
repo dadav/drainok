@@ -26,6 +26,7 @@ A node is considered drainable only if **all** checks pass. DaemonSet pods, mirr
 | `naked-pods` | `naked-pods` | a pod has no controller (no ReplicaSet/StatefulSet/Job owner); a drain deletes it and nothing recreates it. |
 | `local-storage` | `local-storage` | a pod uses `emptyDir` or `hostPath` volumes, or a PVC bound to a PersistentVolume whose node affinity pins it to this node (e.g. local PVs); data would be lost or the pod could never start elsewhere. Only Ready, schedulable nodes count as alternative homes for a volume. |
 | `safe-to-evict` | `safe-to-evict` | a pod is annotated `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`. |
+| `machine-config` | `machine-config` | (OpenShift) the node's Machine Config Daemon reports a `machineconfiguration.openshift.io/state` other than `Done` (`Degraded` and `Unreconcilable` mean the node is stuck; unknown states block too, erring toward "not drainable"), or an update is in flight (`state: Working`, or `currentConfig` differs from `desiredConfig`). Draining collides with the Machine Config Operator, which cordons, drains and reboots the node itself. On non-OpenShift clusters these annotations are absent and the check never fires. |
 
 Known limitations:
 
@@ -33,8 +34,23 @@ Known limitations:
 - Required pod anti-affinity is evaluated in both directions, but only at hostname level (against pods on the candidate node itself); zone-scoped anti-affinity against pods on other nodes in the same zone is not detected.
 - An anti-affinity term with a `namespaceSelector` is treated as matching **all** namespaces, so pods in unrelated namespaces can produce a `constraints` blocker that a real scheduler would not hit.
 - Only CPU, memory and pod count are simulated; extended resources (GPUs, hugepages) are not.
+- Cluster-scoped upgrade state (OpenShift `ClusterVersion` / `ClusterOperator`) is not inspected; the `machine-config` check covers the per-node consequence of an upgrade, which is what governs whether *this* node can drain.
 
 Where accuracy has to be traded off, `drainok` errs toward reporting "not drainable": a false blocker is cheaper than a false green light before a drain.
+
+## OpenShift
+
+`drainok` works against OpenShift 4 clusters using only the core Kubernetes API, so no extra configuration is required. Several OpenShift specifics are handled by the generic checks:
+
+- Static control-plane pods (etcd, kube-apiserver, ...) are mirror pods and are ignored, matching `oc adm drain`.
+- Platform PodDisruptionBudgets (e.g. `etcd-quorum-guard`) are honoured by the `pdb` check, so a master is correctly blocked while another master is down.
+- Control-plane taints (`node-role.kubernetes.io/master`, `.../control-plane`) keep worker pods from being simulated onto masters.
+- Project and cluster-default node selectors (`openshift.io/node-selector`) are merged into pod specs at admission, so the `reschedule` simulation already sees them.
+- The OpenShift-specific `machine-config` check flags nodes the Machine Config Operator is updating or has marked Degraded (see the table above).
+
+**RBAC:** the built-in `cluster-reader` cluster role grants everything `drainok` reads (nodes, pods, PDBs, PVCs, PVs). Bind it with `oc adm policy add-cluster-role-to-user cluster-reader <user>`.
+
+**emptyDir noise:** many `openshift-*` platform pods use `emptyDir` scratch volumes, so `local-storage` will flag nearly every node. This is deliberate (a drain does discard that data), but if you accept it the way `oc adm drain --delete-emptydir-data` does, skip the check with `--ignore-checks local-storage`.
 
 ## Installation
 
@@ -73,7 +89,7 @@ drainok --kubeconfig ~/.kube/other-config --context staging
 | `--kubeconfig` | `$KUBECONFIG` or `~/.kube/config` | Path to the kubeconfig file |
 | `--context` | current context | Kubeconfig context to use |
 | `-o, --output` | `table` | Output format: `table`, `json` or `yaml` |
-| `--ignore-checks` | none | Comma-separated checks to skip (`cluster-health`, `local-storage`, `naked-pods`, `pdb`, `reschedule`, `safe-to-evict`) |
+| `--ignore-checks` | none | Comma-separated checks to skip (`cluster-health`, `local-storage`, `machine-config`, `naked-pods`, `pdb`, `reschedule`, `safe-to-evict`) |
 | `--include-control-plane` | `false` | Evaluate control-plane nodes instead of skipping them |
 | `--config` | `~/.config/drainok/config.yaml` | Optional config file |
 
