@@ -40,3 +40,8 @@ kind-up:
 # Delete the local kind test cluster
 kind-down:
     kind delete cluster --name drainok
+
+# Update all dependencies
+update:
+    go get -u -t ./...
+    go mod tidy
