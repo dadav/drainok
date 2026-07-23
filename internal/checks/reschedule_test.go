@@ -5,6 +5,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/dadav/drainok/internal/kube"
 )
 
 func TestRescheduleFitsSmallPod(t *testing.T) {
@@ -118,5 +120,107 @@ func TestRescheduleReportsConstraintsBlockerForAntiAffinity(t *testing.T) {
 	blockers := RescheduleCheck{}.Run(snap, &snap.Nodes[0])
 	if len(blockers) != 1 || blockers[0].Check != "constraints" {
 		t.Fatalf("expected one constraints blocker, got %v", blockers)
+	}
+}
+
+func TestRescheduleHonoursExistingPodAntiAffinity(t *testing.T) {
+	// The displaced pod has no anti-affinity of its own, but the pod already
+	// on worker-2 refuses to share a host with app=web. The scheduler enforces
+	// required anti-affinity in both directions.
+	snap := testSnapshot(
+		[]corev1.Node{testNode("worker-1", 2000, 4096), testNode("worker-2", 2000, 4096)},
+		[]corev1.Pod{
+			testPod("web-1", "worker-1", 100, 128, func(p *corev1.Pod) { p.Labels["app"] = "web" }),
+			testPod("picky", "worker-2", 100, 128, func(p *corev1.Pod) {
+				p.Spec.Affinity = &corev1.Affinity{
+					PodAntiAffinity: &corev1.PodAntiAffinity{
+						RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+							TopologyKey:   "kubernetes.io/hostname",
+							LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+						}},
+					},
+				}
+			}),
+		},
+	)
+	blockers := RescheduleCheck{}.Run(snap, &snap.Nodes[0])
+	if len(blockers) != 1 || blockers[0].Check != "constraints" {
+		t.Fatalf("expected one constraints blocker, got %v", blockers)
+	}
+}
+
+func TestReschedulePlacesPodOnNodeMatchingItsVolume(t *testing.T) {
+	// The pod's PV is restricted to zone-a, and worker-3 is in that zone.
+	snap := testSnapshot(
+		[]corev1.Node{
+			testNode("worker-1", 2000, 4096, inZone("zone-a")),
+			testNode("worker-2", 2000, 4096, inZone("zone-b")),
+			testNode("worker-3", 2000, 4096, inZone("zone-a")),
+		},
+		[]corev1.Pod{testPod("db", "worker-1", 100, 128, withVolume(pvcVolume("data", "db-data")))},
+	)
+	bindClaim(snap, "db-data", zonalPV("zonal-pv-1", "zone-a"))
+
+	if blockers := (RescheduleCheck{}).Run(snap, &snap.Nodes[0]); len(blockers) != 0 {
+		t.Fatalf("expected no blockers, got %v", blockers)
+	}
+}
+
+func TestRescheduleBlocksWhenNoNodeMatchesVolumeTopology(t *testing.T) {
+	// Plenty of free capacity on worker-2, but it is in the wrong zone, so
+	// the pod's volume cannot follow it there.
+	snap := testSnapshot(
+		[]corev1.Node{
+			testNode("worker-1", 2000, 4096, inZone("zone-a")),
+			testNode("worker-2", 2000, 4096, inZone("zone-b")),
+		},
+		[]corev1.Pod{testPod("db", "worker-1", 100, 128, withVolume(pvcVolume("data", "db-data")))},
+	)
+	bindClaim(snap, "db-data", zonalPV("zonal-pv-1", "zone-a"))
+
+	blockers := RescheduleCheck{}.Run(snap, &snap.Nodes[0])
+	if len(blockers) != 1 || blockers[0].Check != "constraints" {
+		t.Fatalf("expected one constraints blocker, got %v", blockers)
+	}
+}
+
+func inZone(zone string) func(*corev1.Node) {
+	return func(n *corev1.Node) { n.Labels["topology.kubernetes.io/zone"] = zone }
+}
+
+func pvcVolume(name, claimName string) corev1.Volume {
+	return corev1.Volume{
+		Name: name,
+		VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: claimName},
+		},
+	}
+}
+
+// bindClaim registers a bound PVC/PV pair in the default namespace.
+func bindClaim(snap *kube.ClusterSnapshot, claimName string, pv corev1.PersistentVolume) {
+	snap.PVCs["default/"+claimName] = corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: claimName, Namespace: "default"},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: pv.Name},
+	}
+	snap.PVs[pv.Name] = pv
+}
+
+func zonalPV(name, zone string) corev1.PersistentVolume {
+	return corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec: corev1.PersistentVolumeSpec{
+			NodeAffinity: &corev1.VolumeNodeAffinity{
+				Required: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+						MatchExpressions: []corev1.NodeSelectorRequirement{{
+							Key:      "topology.kubernetes.io/zone",
+							Operator: corev1.NodeSelectorOpIn,
+							Values:   []string{zone},
+						}},
+					}},
+				},
+			},
+		},
 	}
 }

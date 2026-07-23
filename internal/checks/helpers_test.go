@@ -69,6 +69,21 @@ func withoutOwner(pod *corev1.Pod) {
 	pod.OwnerReferences = nil
 }
 
+// asDaemonSetPod makes the pod DaemonSet-owned, so a drain would not evict it.
+func asDaemonSetPod(pod *corev1.Pod) {
+	controller := true
+	pod.OwnerReferences = []metav1.OwnerReference{
+		{Kind: "DaemonSet", Name: pod.Name + "-ds", Controller: &controller},
+	}
+}
+
+// notReady marks a node NotReady.
+func notReady(node *corev1.Node) {
+	node.Status.Conditions = []corev1.NodeCondition{
+		{Type: corev1.NodeReady, Status: corev1.ConditionFalse},
+	}
+}
+
 // testSnapshot indexes the given pods by node into a ClusterSnapshot.
 func testSnapshot(nodes []corev1.Node, pods []corev1.Pod) *kube.ClusterSnapshot {
 	snap := &kube.ClusterSnapshot{

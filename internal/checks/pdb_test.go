@@ -43,6 +43,45 @@ func TestPDBAllowsWithRemainingDisruptions(t *testing.T) {
 	}
 }
 
+func TestPDBBlocksOnOverlappingBudgets(t *testing.T) {
+	// Both PDBs allow a disruption, but the eviction API rejects a pod that
+	// two PDBs cover, so the drain would fail anyway.
+	snap := testSnapshot(
+		[]corev1.Node{testNode("worker-1", 2000, 4096)},
+		[]corev1.Pod{testPod("web", "worker-1", 100, 128)},
+	)
+	snap.PDBs = []policyv1.PodDisruptionBudget{
+		testPDB("web-pdb", map[string]string{"app": "web"}, 1),
+		testPDB("catch-all-pdb", nil, 1),
+	}
+
+	blockers := PDBCheck{}.Run(snap, &snap.Nodes[0])
+	if len(blockers) != 1 || blockers[0].Check != "pdb" || blockers[0].Pod != "default/web" {
+		t.Fatalf("expected one pdb blocker for overlapping budgets, got %v", blockers)
+	}
+}
+
+func TestPDBBlocksOnUnparseableSelector(t *testing.T) {
+	snap := testSnapshot(
+		[]corev1.Node{testNode("worker-1", 2000, 4096)},
+		[]corev1.Pod{testPod("web", "worker-1", 100, 128)},
+	)
+	broken := testPDB("broken-pdb", nil, 1)
+	broken.Spec.Selector = &metav1.LabelSelector{
+		MatchExpressions: []metav1.LabelSelectorRequirement{{
+			Key:      "app",
+			Operator: "NotAValidOperator",
+			Values:   []string{"web"},
+		}},
+	}
+	snap.PDBs = []policyv1.PodDisruptionBudget{broken}
+
+	blockers := PDBCheck{}.Run(snap, &snap.Nodes[0])
+	if len(blockers) != 1 || blockers[0].Check != "pdb" || blockers[0].Pod != "default/web" {
+		t.Fatalf("expected one pdb blocker for the invalid selector, got %v", blockers)
+	}
+}
+
 func TestPDBIgnoresNonMatchingSelector(t *testing.T) {
 	snap := testSnapshot(
 		[]corev1.Node{testNode("worker-1", 2000, 4096)},

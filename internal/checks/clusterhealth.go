@@ -6,13 +6,20 @@ import (
 	"github.com/dadav/drainok/internal/kube"
 )
 
+const clusterHealthCheckName = "cluster-health"
+
 // ClusterHealthCheck verifies that at least one other node is Ready and
 // schedulable, so evicted pods have somewhere to go at all.
 type ClusterHealthCheck struct{}
 
-func (ClusterHealthCheck) Name() string { return "cluster-health" }
+func (ClusterHealthCheck) Name() string { return clusterHealthCheckName }
 
 func (ClusterHealthCheck) Run(snap *kube.ClusterSnapshot, node *corev1.Node) []Blocker {
+	// A node with nothing to evict drains successfully even if it is the only
+	// Ready node in the cluster.
+	if len(snap.EvictablePods(node.Name)) == 0 {
+		return nil
+	}
 	for i := range snap.Nodes {
 		other := &snap.Nodes[i]
 		if other.Name == node.Name {
@@ -23,7 +30,7 @@ func (ClusterHealthCheck) Run(snap *kube.ClusterSnapshot, node *corev1.Node) []B
 		}
 	}
 	return []Blocker{{
-		Check:  "cluster-health",
+		Check:  clusterHealthCheckName,
 		Reason: "no other Ready, schedulable node in the cluster",
 	}}
 }

@@ -42,8 +42,6 @@ drainable, 2 the analysis itself failed.`,
 }
 
 func init() {
-	cobra.OnInitialize(initConfig)
-
 	flags := rootCmd.PersistentFlags()
 	flags.StringVar(&configFile, "config", "", "config file (default: ~/.config/drainok/config.yaml)")
 	flags.String("kubeconfig", "", "path to the kubeconfig file (default: $KUBECONFIG or ~/.kube/config)")
@@ -59,7 +57,11 @@ func init() {
 	}
 }
 
-func initConfig() {
+// initConfig loads the config file and wires up env binding. A missing config
+// in the default search path is fine; anything else (an explicit --config that
+// cannot be read, a malformed file) is an analysis error, so a typo never
+// silently analyzes the wrong cluster with the wrong checks.
+func initConfig() error {
 	if configFile != "" {
 		viper.SetConfigFile(configFile)
 	} else if home, err := os.UserHomeDir(); err == nil {
@@ -72,13 +74,18 @@ func initConfig() {
 	viper.AutomaticEnv()
 	if err := viper.ReadInConfig(); err != nil {
 		var notFound viper.ConfigFileNotFoundError
-		if !errors.As(err, &notFound) && configFile != "" {
-			fmt.Fprintf(os.Stderr, "warning: could not read config file: %v\n", err)
+		if errors.As(err, &notFound) {
+			return nil
 		}
+		return fmt.Errorf("read config file: %w", err)
 	}
+	return nil
 }
 
 func run(cmd *cobra.Command, args []string) error {
+	if err := initConfig(); err != nil {
+		return err
+	}
 	client, err := kube.NewClient(viper.GetString("kubeconfig"), viper.GetString("context"))
 	if err != nil {
 		return err

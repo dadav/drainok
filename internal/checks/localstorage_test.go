@@ -80,6 +80,35 @@ func TestPinnedLocalPVBlocks(t *testing.T) {
 	}
 }
 
+func TestPVMatchingOnlyUnavailableNodeBlocks(t *testing.T) {
+	// The PV also selects worker-2, but that node is NotReady, so the volume
+	// has no reachable home once worker-1 is drained.
+	snap := testSnapshot(
+		[]corev1.Node{
+			testNode("worker-1", 2000, 4096),
+			testNode("worker-2", 2000, 4096, notReady),
+		},
+		[]corev1.Pod{testPod("db", "worker-1", 100, 128, withVolume(corev1.Volume{
+			Name: "data",
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: "db-data"},
+			},
+		}))},
+	)
+	snap.PVCs["default/db-data"] = corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: "db-data", Namespace: "default"},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "local-pv-1"},
+	}
+	pv := pinnedPV("local-pv-1", "worker-1")
+	pv.Spec.NodeAffinity.Required.NodeSelectorTerms[0].MatchExpressions[0].Values = []string{"worker-1", "worker-2"}
+	snap.PVs["local-pv-1"] = pv
+
+	blockers := LocalStorageCheck{}.Run(snap, &snap.Nodes[0])
+	if len(blockers) != 1 || blockers[0].Check != "local-storage" {
+		t.Fatalf("expected one local-storage blocker, got %v", blockers)
+	}
+}
+
 func TestNetworkPVDoesNotBlock(t *testing.T) {
 	snap := testSnapshot(
 		[]corev1.Node{testNode("worker-1", 2000, 4096), testNode("worker-2", 2000, 4096)},

@@ -20,18 +20,21 @@ A node is considered drainable only if **all** checks pass. DaemonSet pods, mirr
 
 | Check | Blocker kinds | A node is NOT drainable when... |
 |---|---|---|
-| `cluster-health` | `cluster-health` | no other node in the cluster is Ready and schedulable, so evicted pods have nowhere to go. |
-| `reschedule` | `fit`, `constraints` | a pod cannot be placed on any other node. `constraints`: no other Ready, schedulable node matches the pod's nodeSelector, required node affinity, taints/tolerations, or required pod anti-affinity. `fit`: matching nodes exist, but their free capacity (allocatable minus requests of pods already there) cannot hold the pod's CPU/memory requests. Placement is simulated with first-fit-decreasing bin-packing, so pods displaced together compete for the same free capacity. |
-| `pdb` | `pdb` | a pod is covered by a PodDisruptionBudget that currently allows 0 disruptions; the eviction would be denied and the drain would hang. |
+| `cluster-health` | `cluster-health` | the node has pods to evict and no other node in the cluster is Ready and schedulable, so those pods have nowhere to go. A node with nothing evictable drains fine and is not flagged. |
+| `reschedule` | `fit`, `constraints` | a pod cannot be placed on any other node. `constraints`: no other Ready, schedulable node matches the pod's nodeSelector, required node affinity, taints/tolerations, required pod anti-affinity (in both directions: the pod's own terms and those of the pods already on the target), or the node affinity of the PersistentVolumes it is bound to. `fit`: matching nodes exist, but their free capacity (allocatable minus requests of pods already there) cannot hold the pod's CPU/memory requests. Placement is simulated with first-fit-decreasing bin-packing, so pods displaced together compete for the same free capacity. |
+| `pdb` | `pdb` | a pod is covered by a PodDisruptionBudget that currently allows 0 disruptions (the eviction would be denied and the drain would hang), or by more than one PodDisruptionBudget (the eviction API rejects such pods outright). |
 | `naked-pods` | `naked-pods` | a pod has no controller (no ReplicaSet/StatefulSet/Job owner); a drain deletes it and nothing recreates it. |
-| `local-storage` | `local-storage` | a pod uses `emptyDir` or `hostPath` volumes, or a PVC bound to a PersistentVolume whose node affinity pins it to this node (e.g. local PVs); data would be lost or the pod could never start elsewhere. |
+| `local-storage` | `local-storage` | a pod uses `emptyDir` or `hostPath` volumes, or a PVC bound to a PersistentVolume whose node affinity pins it to this node (e.g. local PVs); data would be lost or the pod could never start elsewhere. Only Ready, schedulable nodes count as alternative homes for a volume. |
 | `safe-to-evict` | `safe-to-evict` | a pod is annotated `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`. |
 
 Known limitations:
 
 - The resource simulation uses pod **requests**, like the kube-scheduler, not live usage. Pods without requests are simulated as size zero.
-- Required pod anti-affinity is only evaluated at hostname level (pods on the candidate node itself); zone-scoped anti-affinity against pods on other nodes is not detected.
+- Required pod anti-affinity is evaluated in both directions, but only at hostname level (against pods on the candidate node itself); zone-scoped anti-affinity against pods on other nodes in the same zone is not detected.
+- An anti-affinity term with a `namespaceSelector` is treated as matching **all** namespaces, so pods in unrelated namespaces can produce a `constraints` blocker that a real scheduler would not hit.
 - Only CPU, memory and pod count are simulated; extended resources (GPUs, hugepages) are not.
+
+Where accuracy has to be traded off, `drainok` errs toward reporting "not drainable": a false blocker is cheaper than a false green light before a drain.
 
 ## Installation
 

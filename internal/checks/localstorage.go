@@ -4,17 +4,18 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/component-helpers/scheduling/corev1/nodeaffinity"
 
 	"github.com/dadav/drainok/internal/kube"
 )
+
+const localStorageCheckName = "local-storage"
 
 // LocalStorageCheck flags pods whose data would be lost or which could not be
 // rescheduled because their storage is tied to the node: emptyDir, hostPath,
 // or PVCs bound to PersistentVolumes pinned to this node via node affinity.
 type LocalStorageCheck struct{}
 
-func (LocalStorageCheck) Name() string { return "local-storage" }
+func (LocalStorageCheck) Name() string { return localStorageCheckName }
 
 func (LocalStorageCheck) Run(snap *kube.ClusterSnapshot, node *corev1.Node) []Blocker {
 	var blockers []Blocker
@@ -23,13 +24,13 @@ func (LocalStorageCheck) Run(snap *kube.ClusterSnapshot, node *corev1.Node) []Bl
 			switch {
 			case vol.EmptyDir != nil:
 				blockers = append(blockers, Blocker{
-					Check:  "local-storage",
+					Check:  localStorageCheckName,
 					Pod:    podKey(&pod),
 					Reason: fmt.Sprintf("pod %s uses emptyDir volume %q whose data is lost on drain", podKey(&pod), vol.Name),
 				})
 			case vol.HostPath != nil:
 				blockers = append(blockers, Blocker{
-					Check:  "local-storage",
+					Check:  localStorageCheckName,
 					Pod:    podKey(&pod),
 					Reason: fmt.Sprintf("pod %s uses hostPath volume %q tied to this node", podKey(&pod), vol.Name),
 				})
@@ -37,7 +38,7 @@ func (LocalStorageCheck) Run(snap *kube.ClusterSnapshot, node *corev1.Node) []Bl
 				pvName := boundPVPinnedToNode(snap, &pod, vol.PersistentVolumeClaim.ClaimName, node)
 				if pvName != "" {
 					blockers = append(blockers, Blocker{
-						Check:  "local-storage",
+						Check:  localStorageCheckName,
 						Pod:    podKey(&pod),
 						Reason: fmt.Sprintf("pod %s uses PersistentVolume %q which is pinned to this node", podKey(&pod), pvName),
 					})
@@ -49,28 +50,21 @@ func (LocalStorageCheck) Run(snap *kube.ClusterSnapshot, node *corev1.Node) []Bl
 }
 
 // boundPVPinnedToNode returns the PV name if the claim is bound to a
-// PersistentVolume whose node affinity matches this node but no other node in
-// the cluster. Returns "" otherwise.
+// PersistentVolume whose node affinity matches this node but no other Ready,
+// schedulable node in the cluster. Returns "" otherwise. Nodes that are
+// NotReady or cordoned do not count as alternative homes for the volume,
+// mirroring the target selection in buildTargets.
 func boundPVPinnedToNode(snap *kube.ClusterSnapshot, pod *corev1.Pod, claimName string, node *corev1.Node) string {
-	pvc, ok := snap.PVCs[pod.Namespace+"/"+claimName]
-	if !ok || pvc.Spec.VolumeName == "" {
+	pv := boundPV(snap, pod.Namespace, claimName)
+	if pv == nil || pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
 		return ""
-	}
-	pv, ok := snap.PVs[pvc.Spec.VolumeName]
-	if !ok || pv.Spec.NodeAffinity == nil || pv.Spec.NodeAffinity.Required == nil {
-		return ""
-	}
-	selector, err := nodeaffinity.NewNodeSelector(pv.Spec.NodeAffinity.Required)
-	if err != nil {
-		// Unparseable affinity: assume pinned rather than report drainable.
-		return pv.Name
 	}
 	for i := range snap.Nodes {
 		other := &snap.Nodes[i]
-		if other.Name == node.Name {
+		if other.Name == node.Name || other.Spec.Unschedulable || !kube.IsNodeReady(other) {
 			continue
 		}
-		if selector.Match(other) {
+		if pvAllowsNode(pv, other) {
 			return ""
 		}
 	}

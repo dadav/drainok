@@ -65,7 +65,7 @@ func (RescheduleCheck) Run(snap *kube.ClusterSnapshot, node *corev1.Node) []Bloc
 		placed := false
 		for t := range targets {
 			target := &targets[t]
-			if !podMatchesNode(pod, target) {
+			if !podMatchesNode(snap, pod, target) {
 				continue
 			}
 			matchingNodes++
@@ -85,7 +85,7 @@ func (RescheduleCheck) Run(snap *kube.ClusterSnapshot, node *corev1.Node) []Bloc
 			blockers = append(blockers, Blocker{
 				Check:  "constraints",
 				Pod:    podKey(pod),
-				Reason: fmt.Sprintf("pod %s matches no other node (nodeSelector/affinity/taints/anti-affinity)", podKey(pod)),
+				Reason: fmt.Sprintf("pod %s matches no other node (nodeSelector/affinity/taints/anti-affinity/volume topology)", podKey(pod)),
 			})
 		} else {
 			blockers = append(blockers, Blocker{
@@ -129,9 +129,10 @@ func buildTargets(snap *kube.ClusterSnapshot, drainedNode string) []targetNode {
 }
 
 // podMatchesNode mirrors the scheduler's hard predicates: nodeSelector and
-// required node affinity, NoSchedule/NoExecute taints, and required pod
-// anti-affinity against pods already on the target.
-func podMatchesNode(pod *corev1.Pod, target *targetNode) bool {
+// required node affinity, NoSchedule/NoExecute taints, required pod
+// anti-affinity against pods already on the target, and the node affinity of
+// the PersistentVolumes the pod is bound to.
+func podMatchesNode(snap *kube.ClusterSnapshot, pod *corev1.Pod, target *targetNode) bool {
 	match, err := nodeaffinity.GetRequiredNodeAffinity(pod).Match(target.node)
 	if err != nil || !match {
 		return false
@@ -148,37 +149,75 @@ func podMatchesNode(pod *corev1.Pod, target *targetNode) bool {
 	if untolerated {
 		return false
 	}
+	if !podVolumesFitNode(snap, pod, target.node) {
+		return false
+	}
 	return antiAffinityAllows(pod, target)
 }
 
-// antiAffinityAllows checks the pod's own required anti-affinity terms
-// against the pods on the target node. NamespaceSelector is treated as
-// matching all namespaces, erring on the side of "not drainable".
+// podVolumesFitNode reports whether every PersistentVolume bound to the pod
+// can be mounted on the target node. A volume pinned by node affinity (local
+// or zonal storage) cannot follow the pod to a node it does not select.
+func podVolumesFitNode(snap *kube.ClusterSnapshot, pod *corev1.Pod, node *corev1.Node) bool {
+	for _, vol := range pod.Spec.Volumes {
+		if vol.PersistentVolumeClaim == nil {
+			continue
+		}
+		pv := boundPV(snap, pod.Namespace, vol.PersistentVolumeClaim.ClaimName)
+		if pv == nil {
+			continue
+		}
+		if !pvAllowsNode(pv, node) {
+			return false
+		}
+	}
+	return true
+}
+
+// antiAffinityAllows checks required pod anti-affinity in both directions: the
+// incoming pod's own terms against the pods already on the target, and those
+// pods' terms against the incoming pod. The scheduler enforces both; only the
+// preferred terms of existing pods are ignored.
 func antiAffinityAllows(pod *corev1.Pod, target *targetNode) bool {
-	if pod.Spec.Affinity == nil || pod.Spec.Affinity.PodAntiAffinity == nil {
+	for i := range target.pods {
+		existing := &target.pods[i]
+		if !antiAffinityTermsAllow(pod, existing, target.node) {
+			return false
+		}
+		if !antiAffinityTermsAllow(existing, pod, target.node) {
+			return false
+		}
+	}
+	return true
+}
+
+// antiAffinityTermsAllow reports whether source's required anti-affinity terms
+// tolerate other running alongside it on node.
+func antiAffinityTermsAllow(source, other *corev1.Pod, node *corev1.Node) bool {
+	if source.Spec.Affinity == nil || source.Spec.Affinity.PodAntiAffinity == nil {
 		return true
 	}
-	for _, term := range pod.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
-		if _, hasTopologyLabel := target.node.Labels[term.TopologyKey]; !hasTopologyLabel {
+	for _, term := range source.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution {
+		if _, hasTopologyLabel := node.Labels[term.TopologyKey]; !hasTopologyLabel {
 			continue
 		}
 		selector, err := metav1.LabelSelectorAsSelector(term.LabelSelector)
 		if err != nil {
 			return false
 		}
-		for i := range target.pods {
-			existing := &target.pods[i]
-			if !termCoversNamespace(pod, existing.Namespace, &term) {
-				continue
-			}
-			if selector.Matches(labels.Set(existing.Labels)) {
-				return false
-			}
+		if !termCoversNamespace(source, other.Namespace, &term) {
+			continue
+		}
+		if selector.Matches(labels.Set(other.Labels)) {
+			return false
 		}
 	}
 	return true
 }
 
+// termCoversNamespace reports whether the term applies to pods in namespace.
+// NamespaceSelector is treated as matching all namespaces, erring on the side
+// of "not drainable".
 func termCoversNamespace(pod *corev1.Pod, namespace string, term *corev1.PodAffinityTerm) bool {
 	if term.NamespaceSelector != nil {
 		return true
