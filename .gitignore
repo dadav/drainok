@@ -1,0 +1,13 @@
+# Build output
+/drainok
+/drainok.exe
+/dist/
+
+# Test and coverage artifacts
+*.test
+*.out
+
+# Editor files
+.idea/
+.vscode/
+*.swp
