@@ -16,6 +16,7 @@ just fmt                # gofmt -w .
 just run -- worker-1    # go run against the current kube context
 just snapshot           # local goreleaser snapshot build
 just kind-up/kind-down  # 3-node kind test cluster from kind-config.yaml
+just e2e [context]      # e2e test on a kind cluster (default context kind-drainok); build-tagged, excluded from `just test`
 
 go test ./internal/checks -run TestPDBBlocksAtZeroDisruptions   # single test
 ```

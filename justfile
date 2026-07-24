@@ -41,6 +41,10 @@ kind-up:
 kind-down:
     kind delete cluster --name drainok
 
+# Run the e2e test against a kind cluster (create it with kind-up first)
+e2e context="kind-drainok":
+    DRAINOK_E2E_CONTEXT={{ context }} go test -tags e2e -count=1 -timeout 10m ./e2e
+
 # Update all dependencies
 update:
     go get -u -t ./...
