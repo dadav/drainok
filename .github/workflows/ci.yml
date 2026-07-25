@@ -31,7 +31,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build snapshot binaries with goreleaser
-        uses: goreleaser/goreleaser-action@v6
+        uses: goreleaser/goreleaser-action@v7
         with:
           version: "~> v2"
           args: release --snapshot --clean
