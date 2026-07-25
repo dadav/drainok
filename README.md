@@ -7,14 +7,6 @@
 
 <br />
 
-<p align="center">
-  <a href="logo.png">
-    <img src="logo.png" alt="awesome drainok logo" width="700" />
-  </a>
-</p>
-
-<br />
-
 ## Overview
 
 `drainok` checks every node of a Kubernetes cluster against a set of drainability conditions and reports whether a drain would go through cleanly. It is completely **read-only**: nothing is cordoned, nothing is evicted.
